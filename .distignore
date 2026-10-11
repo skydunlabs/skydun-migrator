@@ -1,0 +1,7 @@
+/.git
+/.github
+/.wordpress-org
+/build
+.distignore
+.gitignore
+README.md

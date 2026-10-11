@@ -10,25 +10,37 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Check the tag matches the plugin version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          header="$(sed -n 's/^ \* Version: *//p' managed-wp-migrator.php)"
-          constant="$(sed -n "s/^ *const VERSION = '\(.*\)';/\1/p" managed-wp-migrator.php)"
-          echo "tag=$tag header=$header constant=$constant"
-          test "$tag" = "$header" && test "$tag" = "$constant"
+          header="$(sed -n 's/^ \* Version: *//p' sky-migrate.php)"
+          constant="$(sed -n "s/^ *const VERSION = '\(.*\)';/\1/p" sky-migrate.php)"
+          stable="$(sed -n 's/^Stable tag: *//p' readme.txt)"
+          echo "tag=$tag header=$header constant=$constant stable=$stable"
+          test "$tag" = "$header" && test "$tag" = "$constant" && test "$tag" = "$stable"
 
       - name: Build the installable zip
         run: |
-          mkdir -p build/managed-wp-migrator
-          cp managed-wp-migrator.php build/managed-wp-migrator/
-          (cd build && zip -r ../managed-wp-migrator.zip managed-wp-migrator)
+          mkdir -p build/sky-migrate
+          rsync -a --exclude-from=.distignore ./ build/sky-migrate/
+          (cd build && zip -r ../sky-migrate.zip sky-migrate)
 
-      # Managed WP serves the asset named managed-wp-migrator.zip from the latest release.
-      - name: Publish the release
+      # Skydun serves the asset named sky-migrate.zip from the latest release.
+      - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" managed-wp-migrator.zip --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" sky-migrate.zip --title "$GITHUB_REF_NAME" --generate-notes
+
+      # Runs once the plugin is approved on WordPress.org and the SVN
+      # credentials are saved as repository secrets.
+      - name: Deploy to WordPress.org
+        if: ${{ env.SVN_USERNAME != '' }}
+        uses: 10up/action-wordpress-plugin-deploy@stable
+        env:
+          SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
+          SLUG: sky-migrate

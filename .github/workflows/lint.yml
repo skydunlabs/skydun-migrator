@@ -12,11 +12,25 @@ jobs:
     strategy:
       matrix:
         # Old websites run old PHP; the plugin header promises 7.4.
-        php: ['7.4', '8.0', '8.3']
+        php: ['7.4', '8.0', '8.3', '8.4']
     steps:
       - uses: actions/checkout@v4
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
           coverage: none
-      - run: php -l managed-wp-migrator.php
+      - run: php -l sky-migrate.php
+
+  plugin-check:
+    name: Plugin Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the plugin folder
+        run: |
+          mkdir -p build/sky-migrate
+          rsync -a --exclude-from=.distignore ./ build/sky-migrate/
+      # The checks WordPress.org runs on submitted plugins.
+      - uses: wordpress/plugin-check-action@v1
+        with:
+          build-dir: build/sky-migrate

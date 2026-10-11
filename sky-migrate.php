@@ -1,15 +1,18 @@
 <?php
 /**
- * Plugin Name:       Managed WP Migrator
- * Description:       Copies this website into Managed WP. Paste the migration key from Managed WP under Tools → Migrate to Managed WP.
+ * Plugin Name:       Sky Migrate
+ * Plugin URI:        https://skydun.com
+ * Description:       Copies this website to Skydun. Paste the migration key from Skydun under Tools → Sky Migrate.
  * Version:           1.0.0
  * Requires at least: 5.0
  * Requires PHP:      7.4
- * Author:            Managed WP
+ * Author:            Skydun
+ * Author URI:        https://skydun.com
  * License:           GPL-2.0-or-later
- * Text Domain:       managed-wp-migrator
+ * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
+ * Text Domain:       sky-migrate
  *
- * How it works: Managed WP pulls this website in small, signed requests, so it
+ * How it works: Skydun pulls this website in small, signed requests, so it
  * runs on hosts with short time and memory limits and needs no FTP or database
  * passwords. Every request to the export endpoints must carry an HMAC-SHA256
  * signature made with the secret from the migration key; nothing is served
@@ -19,16 +22,34 @@
  */
 defined('ABSPATH') || exit;
 
-final class Managed_WP_Migrator
+final class Sky_Migrate
 {
     const VERSION = '1.0.0';
 
+    const SLUG = 'sky-migrate';
+
     /** The connection: panel URL, source token, secret, and the migration page URL. */
-    const OPTION = 'managed_wp_migrator';
+    const OPTION = 'sky_migrate';
+
+    /** When the last copy finished, and where to see it. */
+    const FINISHED_OPTION = 'sky_migrate_finished';
+
+    const ESTIMATES_TRANSIENT = 'sky_migrate_estimates';
+
+    /** 'redirect' right after activation, 'notice' when redirecting would get in the way. */
+    const ACTIVATED_TRANSIENT = 'sky_migrate_activated';
+
+    // The key format, REST namespace, AJAX action and error code prefix are
+    // the contract with Skydun's migration driver; they keep their original
+    // names so existing Skydun releases keep working.
 
     const KEY_PREFIX = 'mwp1_';
 
     const REST_NAMESPACE = 'managed-wp-migrator/v1';
+
+    const AJAX_ACTION = 'managed_wp_migrator';
+
+    const ERROR_PREFIX = 'managed_wp_migrator_';
 
     const ENDPOINTS = ['info', 'tables', 'table-chunk', 'files', 'file-chunk', 'finish'];
 
@@ -56,8 +77,8 @@ final class Managed_WP_Migrator
     /**
      * Paths never sent, relative to the website root. wp-config.php holds
      * this host's secrets; core comes from WordPress.org on the new website;
-     * caches, backups and drop-ins would break or bloat the copy; the Managed
-     * WP helpers and the object cache plugin are the new website's own.
+     * caches, backups and drop-ins would break or bloat the copy; the Skydun
+     * helpers and the object cache plugin are the new website's own.
      */
     const EXCLUDED = [
         'wp-config.php',
@@ -103,6 +124,7 @@ final class Managed_WP_Migrator
         'wp-content/wflogs',
         'wp-content/et-cache',
         'wp-content/litespeed',
+        'wp-content/plugins/sky-migrate',
         'wp-content/plugins/managed-wp-migrator',
         'wp-content/plugins/redis-cache',
     ];
@@ -127,17 +149,41 @@ final class Managed_WP_Migrator
     public static function boot()
     {
         add_action('admin_menu', [__CLASS__, 'add_page']);
-        add_action('admin_post_managed_wp_migrator_connect', [__CLASS__, 'connect']);
-        add_action('admin_post_managed_wp_migrator_disconnect', [__CLASS__, 'disconnect']);
+        add_action('admin_enqueue_scripts', [__CLASS__, 'enqueue_assets']);
+        add_action('admin_init', [__CLASS__, 'redirect_after_activation']);
+        add_action('admin_notices', [__CLASS__, 'activation_notice']);
+        add_filter('plugin_action_links_'.plugin_basename(__FILE__), [__CLASS__, 'action_links']);
+        add_action('admin_post_sky_migrate_connect', [__CLASS__, 'connect']);
+        add_action('admin_post_sky_migrate_disconnect', [__CLASS__, 'disconnect']);
+        add_action('wp_ajax_sky_migrate_preflight', [__CLASS__, 'preflight']);
         add_action('rest_api_init', [__CLASS__, 'register_routes']);
         // Fallback for websites whose security plugin blocks the REST API.
-        add_action('wp_ajax_nopriv_managed_wp_migrator', [__CLASS__, 'dispatch_ajax']);
-        add_action('wp_ajax_managed_wp_migrator', [__CLASS__, 'dispatch_ajax']);
+        add_action('wp_ajax_nopriv_'.self::AJAX_ACTION, [__CLASS__, 'dispatch_ajax']);
+        add_action('wp_ajax_'.self::AJAX_ACTION, [__CLASS__, 'dispatch_ajax']);
+    }
+
+    /**
+     * Open the migration page on the next admin page load. Not for WP-CLI,
+     * which has no browser to send there.
+     */
+    public static function activate()
+    {
+        if (! (defined('WP_CLI') && WP_CLI)) {
+            set_transient(self::ACTIVATED_TRANSIENT, 'redirect', 60);
+        }
     }
 
     public static function forget()
     {
         delete_option(self::OPTION);
+    }
+
+    public static function uninstall()
+    {
+        delete_option(self::OPTION);
+        delete_option(self::FINISHED_OPTION);
+        delete_transient(self::ESTIMATES_TRANSIENT);
+        delete_transient(self::ACTIVATED_TRANSIENT);
     }
 
     // ------------------------------------------------------------------
@@ -147,12 +193,97 @@ final class Managed_WP_Migrator
     public static function add_page()
     {
         add_management_page(
-            __('Migrate to Managed WP', 'managed-wp-migrator'),
-            __('Migrate to Managed WP', 'managed-wp-migrator'),
+            __('Sky Migrate', 'sky-migrate'),
+            __('Sky Migrate', 'sky-migrate'),
             'manage_options',
-            'managed-wp-migrator',
+            self::SLUG,
             [__CLASS__, 'render_page']
         );
+    }
+
+    private static function page_url()
+    {
+        return admin_url('tools.php?page='.self::SLUG);
+    }
+
+    public static function enqueue_assets($hook)
+    {
+        if ($hook !== 'tools_page_'.self::SLUG) {
+            return;
+        }
+
+        wp_enqueue_style(self::SLUG, plugins_url('assets/admin.css', __FILE__), [], self::VERSION);
+        wp_enqueue_script(self::SLUG, plugins_url('assets/admin.js', __FILE__), [], self::VERSION, true);
+        wp_localize_script(
+            self::SLUG,
+            'skyMigrate',
+            [
+                'ajaxUrl' => admin_url('admin-ajax.php'),
+                'nonce' => wp_create_nonce('sky_migrate_preflight'),
+                'keyPrefix' => self::KEY_PREFIX,
+                'i18n' => [
+                    'failed' => __('Could not check this website. Reload the page to try again.', 'sky-migrate'),
+                    'badKey' => __('A migration key starts with mwp1_. Copy it again from Skydun.', 'sky-migrate'),
+                ],
+            ]
+        );
+    }
+
+    public static function action_links($links)
+    {
+        array_unshift($links, '<a href="'.esc_url(self::page_url()).'">'.esc_html__('Migrate', 'sky-migrate').'</a>');
+
+        return $links;
+    }
+
+    /**
+     * Right after a single activation, open the migration page. Bulk,
+     * network and AJAX activations (the Activate button on Add Plugins)
+     * show activation_notice() instead.
+     */
+    public static function redirect_after_activation()
+    {
+        if (get_transient(self::ACTIVATED_TRANSIENT) !== 'redirect') {
+            return;
+        }
+
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- only reads which screen WordPress redirected to.
+        if (wp_doing_ajax() || is_network_admin() || isset($_GET['activate-multi']) || ! current_user_can('manage_options')) {
+            set_transient(self::ACTIVATED_TRANSIENT, 'notice', 60);
+
+            return;
+        }
+
+        delete_transient(self::ACTIVATED_TRANSIENT);
+        wp_safe_redirect(self::page_url());
+        exit;
+    }
+
+    /**
+     * Once, after an activation that did not redirect, point to the
+     * migration page.
+     */
+    public static function activation_notice()
+    {
+        if (get_transient(self::ACTIVATED_TRANSIENT) !== 'notice' || ! current_user_can('manage_options')) {
+            return;
+        }
+
+        $screen = function_exists('get_current_screen') ? get_current_screen() : null;
+
+        if ($screen !== null && $screen->id === 'tools_page_'.self::SLUG) {
+            return;
+        }
+
+        delete_transient(self::ACTIVATED_TRANSIENT);
+        ?>
+		<div class="notice notice-success is-dismissible">
+			<p>
+				<?php esc_html_e('Sky Migrate is ready. Paste your migration key from Skydun to start copying this website.', 'sky-migrate'); ?>
+				<a href="<?php echo esc_url(self::page_url()); ?>"><?php esc_html_e('Open Sky Migrate', 'sky-migrate'); ?></a>
+			</p>
+		</div>
+		<?php
     }
 
     public static function render_page()
@@ -162,69 +293,296 @@ final class Managed_WP_Migrator
         }
 
         $config = self::config();
-        $notice = get_transient('managed_wp_migrator_notice_'.get_current_user_id());
-        delete_transient('managed_wp_migrator_notice_'.get_current_user_id());
+        $finished = get_option(self::FINISHED_OPTION);
+        $finished = is_array($finished) ? $finished : null;
+        $connected = ! empty($config['connected_at']);
+        $notice = get_transient('sky_migrate_notice_'.get_current_user_id());
+        delete_transient('sky_migrate_notice_'.get_current_user_id());
+
+        if ($connected) {
+            $step = 2;
+        } elseif ($finished !== null) {
+            $step = 3;
+        } else {
+            $step = 1;
+        }
+
+        $steps = [
+            1 => __('Connect', 'sky-migrate'),
+            2 => __('Copy', 'sky-migrate'),
+            3 => __('Done', 'sky-migrate'),
+        ];
         ?>
-		<div class="wrap">
-			<h1><?php esc_html_e('Migrate to Managed WP', 'managed-wp-migrator'); ?></h1>
+		<div class="wrap sky-migrate">
+			<h1><?php esc_html_e('Sky Migrate', 'sky-migrate'); ?></h1>
+			<p class="sky-migrate-lead"><?php esc_html_e('Copy this website to Skydun: database, themes, plugins and uploads. Nothing on this website is changed, and it keeps working normally during the copy.', 'sky-migrate'); ?></p>
 
 			<?php if (is_array($notice)) { ?>
-				<div class="notice notice-<?php echo $notice['type'] === 'error' ? 'error' : 'success'; ?>">
+				<div class="notice notice-<?php echo esc_attr($notice['type'] === 'error' ? 'error' : 'success'); ?>">
 					<p><?php echo esc_html($notice['message']); ?></p>
 				</div>
 			<?php } ?>
 
 			<?php if (is_multisite()) { ?>
-				<div class="notice notice-error"><p><?php esc_html_e('WordPress multisite networks cannot be migrated yet.', 'managed-wp-migrator'); ?></p></div>
-			<?php } elseif (! empty($config['connected_at'])) { ?>
-				<p><?php esc_html_e('This website is connected to Managed WP. The copy runs from Managed WP: you can close this page, and this website keeps working normally while it is copied.', 'managed-wp-migrator'); ?></p>
-				<?php if (! empty($config['migration_url'])) { ?>
-					<p><a class="button button-primary" href="<?php echo esc_url($config['migration_url']); ?>" target="_blank" rel="noopener noreferrer"><?php esc_html_e('Follow the progress in Managed WP', 'managed-wp-migrator'); ?></a></p>
-				<?php } ?>
-				<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
-					<input type="hidden" name="action" value="managed_wp_migrator_disconnect" />
-					<?php wp_nonce_field('managed_wp_migrator_disconnect'); ?>
-					<p><?php esc_html_e('Disconnect to stop Managed WP from reading this website. A running copy then fails.', 'managed-wp-migrator'); ?></p>
-					<?php submit_button(__('Disconnect', 'managed-wp-migrator'), 'secondary', 'submit', false); ?>
-				</form>
+				<div class="notice notice-error"><p><?php esc_html_e('WordPress multisite networks cannot be migrated yet.', 'sky-migrate'); ?></p></div>
 			<?php } else { ?>
-				<p><?php esc_html_e('Paste the migration key shown on the migration page in Managed WP. Managed WP then copies the database, themes, plugins and uploads of this website into your new website. Nothing on this website is changed.', 'managed-wp-migrator'); ?></p>
-				<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
-					<input type="hidden" name="action" value="managed_wp_migrator_connect" />
-					<?php wp_nonce_field('managed_wp_migrator_connect'); ?>
-					<table class="form-table" role="presentation">
-						<tr>
-							<th scope="row"><label for="managed-wp-migration-key"><?php esc_html_e('Migration key', 'managed-wp-migrator'); ?></label></th>
-							<td><textarea id="managed-wp-migration-key" name="migration_key" rows="4" class="large-text code" required autocomplete="off" spellcheck="false"></textarea></td>
-						</tr>
-					</table>
-					<?php submit_button(__('Connect', 'managed-wp-migrator')); ?>
-				</form>
+				<ol class="sky-migrate-steps">
+					<?php foreach ($steps as $number => $label) { ?>
+						<?php
+                        // The last step is done, not in progress, once reached.
+                        $class = $number < $step || ($number === 3 && $step === 3) ? 'is-done' : ($number === $step ? 'is-current' : '');
+					    ?>
+						<li class="<?php echo esc_attr($class); ?>"<?php echo $number === $step ? ' aria-current="step"' : ''; ?>>
+							<span class="sky-migrate-step-number"><?php echo esc_html((string) $number); ?></span>
+							<span class="sky-migrate-step-label"><?php echo esc_html($label); ?></span>
+						</li>
+					<?php } ?>
+				</ol>
+
+				<div class="sky-migrate-layout">
+					<div class="sky-migrate-main">
+						<?php
+                        if ($connected) {
+                            self::render_connected($config);
+                        } else {
+                            if ($finished !== null) {
+                                self::render_finished($finished);
+                            }
+
+                            self::render_connect_form($finished !== null);
+                        }
+					    ?>
+					</div>
+					<div class="sky-migrate-side">
+						<?php self::render_preflight(); ?>
+						<?php self::render_scope(); ?>
+					</div>
+				</div>
 			<?php } ?>
 		</div>
 		<?php
     }
 
     /**
-     * Store the key, then report this website to Managed WP.
+     * @param  array<string, mixed>  $config
+     */
+    private static function render_connected($config)
+    {
+        ?>
+		<div class="sky-migrate-card">
+			<h2><span class="dashicons dashicons-update sky-migrate-icon is-active" aria-hidden="true"></span><?php esc_html_e('Connected to Skydun', 'sky-migrate'); ?></h2>
+			<p>
+				<?php
+            /* translators: %s: how long ago, e.g. "5 mins". */
+            echo esc_html(sprintf(__('Connected %s ago.', 'sky-migrate'), human_time_diff((int) $config['connected_at'])));
+        ?>
+				<?php esc_html_e('Skydun copies this website as soon as your new website is ready. You can close this page.', 'sky-migrate'); ?>
+			</p>
+			<?php if (! empty($config['migration_url'])) { ?>
+				<p><a class="button button-primary button-hero" href="<?php echo esc_url($config['migration_url']); ?>" target="_blank" rel="noopener noreferrer"><?php esc_html_e('Follow the progress in Skydun', 'sky-migrate'); ?></a></p>
+			<?php } ?>
+		</div>
+
+		<div class="sky-migrate-card">
+			<h2><?php esc_html_e('Disconnect', 'sky-migrate'); ?></h2>
+			<p><?php esc_html_e('Stops Skydun from reading this website and deletes the migration key from it. A running copy then fails.', 'sky-migrate'); ?></p>
+			<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+				<input type="hidden" name="action" value="sky_migrate_disconnect" />
+				<?php wp_nonce_field('sky_migrate_disconnect'); ?>
+				<?php submit_button(__('Disconnect', 'sky-migrate'), 'secondary', 'submit', false); ?>
+			</form>
+		</div>
+		<?php
+    }
+
+    /**
+     * @param  array<string, mixed>  $finished
+     */
+    private static function render_finished($finished)
+    {
+        ?>
+		<div class="sky-migrate-card is-success">
+			<h2><span class="dashicons dashicons-yes-alt sky-migrate-icon" aria-hidden="true"></span><?php esc_html_e('Copy finished', 'sky-migrate'); ?></h2>
+			<p>
+				<?php
+            /* translators: %s: how long ago, e.g. "2 hours". */
+            echo esc_html(sprintf(__('Skydun finished copying this website %s ago and the migration key was deleted from it.', 'sky-migrate'), human_time_diff((int) $finished['at'])));
+        ?>
+				<?php esc_html_e('You can now deactivate and delete Sky Migrate.', 'sky-migrate'); ?>
+			</p>
+			<?php if (! empty($finished['migration_url'])) { ?>
+				<p><a class="button button-primary" href="<?php echo esc_url($finished['migration_url']); ?>" target="_blank" rel="noopener noreferrer"><?php esc_html_e('Open your website in Skydun', 'sky-migrate'); ?></a></p>
+			<?php } ?>
+		</div>
+		<?php
+    }
+
+    private static function render_connect_form($again)
+    {
+        ?>
+		<div class="sky-migrate-card">
+			<h2><?php $again ? esc_html_e('Copy again', 'sky-migrate') : esc_html_e('Paste your migration key', 'sky-migrate'); ?></h2>
+			<p><?php esc_html_e('Find the key on the migration page of your new website in Skydun, copy it, and paste it here.', 'sky-migrate'); ?></p>
+			<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" id="sky-migrate-connect">
+				<input type="hidden" name="action" value="sky_migrate_connect" />
+				<?php wp_nonce_field('sky_migrate_connect'); ?>
+				<label class="screen-reader-text" for="sky-migrate-key"><?php esc_html_e('Migration key', 'sky-migrate'); ?></label>
+				<textarea id="sky-migrate-key" name="migration_key" rows="4" class="large-text code" required autocomplete="off" spellcheck="false" placeholder="mwp1_…" aria-describedby="sky-migrate-key-error"></textarea>
+				<p id="sky-migrate-key-error" class="sky-migrate-field-error" hidden></p>
+				<?php submit_button(__('Connect', 'sky-migrate'), 'primary', 'submit', true, ['id' => 'sky-migrate-submit']); ?>
+			</form>
+		</div>
+		<?php
+    }
+
+    /**
+     * Filled by assets/admin.js from preflight(), since sizing the website
+     * takes a few seconds.
+     */
+    private static function render_preflight()
+    {
+        ?>
+		<div class="sky-migrate-card" id="sky-migrate-preflight" aria-live="polite">
+			<h2><?php esc_html_e('This website', 'sky-migrate'); ?></h2>
+			<dl class="sky-migrate-facts">
+				<dt><?php esc_html_e('WordPress', 'sky-migrate'); ?></dt>
+				<dd><?php echo esc_html(get_bloginfo('version')); ?></dd>
+				<dt><?php esc_html_e('PHP', 'sky-migrate'); ?></dt>
+				<dd><?php echo esc_html(PHP_VERSION); ?></dd>
+				<dt><?php esc_html_e('Database', 'sky-migrate'); ?></dt>
+				<dd data-fact="database"><span class="spinner is-active"></span></dd>
+				<dt><?php esc_html_e('Files', 'sky-migrate'); ?></dt>
+				<dd data-fact="files"><span class="spinner is-active"></span></dd>
+			</dl>
+			<ul class="sky-migrate-checks" data-checks>
+				<li class="is-pending"><span class="spinner is-active"></span><?php esc_html_e('Checking that Skydun can reach this website…', 'sky-migrate'); ?></li>
+			</ul>
+		</div>
+		<?php
+    }
+
+    private static function render_scope()
+    {
+        ?>
+		<div class="sky-migrate-card">
+			<h2><?php esc_html_e('What is copied', 'sky-migrate'); ?></h2>
+			<ul class="sky-migrate-scope is-included">
+				<li><?php esc_html_e('The database: posts, pages, users, settings and plugin data', 'sky-migrate'); ?></li>
+				<li><?php esc_html_e('Themes, plugins and must-use plugins', 'sky-migrate'); ?></li>
+				<li><?php esc_html_e('Uploads and other files in the website folder', 'sky-migrate'); ?></li>
+			</ul>
+			<h3><?php esc_html_e('What is not copied', 'sky-migrate'); ?></h3>
+			<ul class="sky-migrate-scope is-excluded">
+				<li><?php esc_html_e('wp-config.php, with this host’s passwords', 'sky-migrate'); ?></li>
+				<li><?php esc_html_e('WordPress core files; your new website gets a fresh copy', 'sky-migrate'); ?></li>
+				<li><?php esc_html_e('Caches, backups, logs and this host’s own plugins', 'sky-migrate'); ?></li>
+			</ul>
+		</div>
+		<?php
+    }
+
+    /**
+     * Sizes the website and checks that the export endpoints answer, for the
+     * "This website" card.
+     */
+    public static function preflight()
+    {
+        check_ajax_referer('sky_migrate_preflight');
+
+        if (! current_user_can('manage_options')) {
+            wp_send_json_error(null, 403);
+        }
+
+        $estimates = self::estimates();
+        $rest = self::probe(rest_url(self::REST_NAMESPACE.'/info'));
+        $ajax = self::probe(add_query_arg(['action' => self::AJAX_ACTION, 'endpoint' => 'info'], admin_url('admin-ajax.php')));
+
+        if ($estimates['files_complete']) {
+            /* translators: 1: number of files, 2: their total size, e.g. "12 MB". */
+            $files = sprintf(__('%1$s files, %2$s', 'sky-migrate'), number_format_i18n($estimates['file_count']), size_format($estimates['file_bytes']));
+        } else {
+            /* translators: %s: number of files counted so far. */
+            $files = sprintf(__('More than %s files', 'sky-migrate'), number_format_i18n($estimates['file_count']));
+        }
+
+        $checks = [
+            [
+                'ok' => $rest,
+                'label' => $rest
+                    ? __('The REST API answers', 'sky-migrate')
+                    : __('The REST API is blocked', 'sky-migrate'),
+            ],
+            [
+                'ok' => $ajax,
+                'label' => $ajax
+                    ? __('The admin-ajax fallback answers', 'sky-migrate')
+                    : __('The admin-ajax fallback is blocked', 'sky-migrate'),
+            ],
+        ];
+
+        if (! $rest && ! $ajax) {
+            $checks[] = [
+                'ok' => false,
+                'label' => __('Skydun may not be able to read this website. Allow requests to the REST API or admin-ajax.php in your security plugin or firewall, then reload this page.', 'sky-migrate'),
+            ];
+        }
+
+        wp_send_json_success(
+            [
+                'database' => size_format($estimates['db_bytes']),
+                'files' => $files,
+                'checks' => $checks,
+            ]
+        );
+    }
+
+    /**
+     * Whether an unsigned request to an export endpoint reaches this plugin,
+     * which then refuses it with one of its own error codes.
+     */
+    private static function probe($url)
+    {
+        $response = wp_remote_post(
+            $url,
+            [
+                'timeout' => 10,
+                'redirection' => 2,
+                'headers' => ['Content-Type' => 'application/json'],
+                'body' => '{}',
+                'sslverify' => apply_filters('https_local_ssl_verify', false), // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- WordPress core's loopback filter.
+            ]
+        );
+
+        if (is_wp_error($response)) {
+            return false;
+        }
+
+        $reply = json_decode((string) wp_remote_retrieve_body($response), true);
+
+        return is_array($reply) && isset($reply['code']) && strpos((string) $reply['code'], self::ERROR_PREFIX) === 0;
+    }
+
+    /**
+     * Store the key, then report this website to Skydun.
      */
     public static function connect()
     {
         if (! current_user_can('manage_options')) {
-            wp_die(esc_html__('You are not allowed to do this.', 'managed-wp-migrator'), 403);
+            wp_die(esc_html__('You are not allowed to do this.', 'sky-migrate'), 403);
         }
 
-        check_admin_referer('managed_wp_migrator_connect');
+        check_admin_referer('sky_migrate_connect');
 
-        $key = isset($_POST['migration_key']) ? trim(sanitize_textarea_field(wp_unslash($_POST['migration_key']))) : '';
-        $parsed = self::parse_key($key);
+        // Keys pasted from email or chat often pick up line breaks.
+        $key = isset($_POST['migration_key']) ? preg_replace('/\s+/', '', sanitize_textarea_field(wp_unslash($_POST['migration_key']))) : '';
+        $parsed = self::parse_key((string) $key);
 
         if ($parsed === null) {
-            self::redirect_with('error', __('This is not a Managed WP migration key. Copy it again from the migration page.', 'managed-wp-migrator'));
+            self::redirect_with('error', __('This is not a Skydun migration key. Copy it again from the migration page in Skydun.', 'sky-migrate'));
         }
 
         if (is_multisite()) {
-            self::redirect_with('error', __('WordPress multisite networks cannot be migrated yet.', 'managed-wp-migrator'));
+            self::redirect_with('error', __('WordPress multisite networks cannot be migrated yet.', 'sky-migrate'));
         }
 
         update_option(self::OPTION, $parsed, false);
@@ -251,7 +609,7 @@ final class Managed_WP_Migrator
         if (is_wp_error($response)) {
             self::forget();
             /* translators: %s: the connection error. */
-            self::redirect_with('error', sprintf(__('Could not reach Managed WP: %s', 'managed-wp-migrator'), $response->get_error_message()));
+            self::redirect_with('error', sprintf(__('Could not reach Skydun: %s', 'sky-migrate'), $response->get_error_message()));
         }
 
         $status = (int) wp_remote_retrieve_response_code($response);
@@ -261,33 +619,34 @@ final class Managed_WP_Migrator
             self::forget();
             $message = is_array($reply) && ! empty($reply['message']) && $status !== 403
                 ? (string) $reply['message']
-                : __('Managed WP did not accept the key. Copy it again from the migration page.', 'managed-wp-migrator');
+                : __('Skydun did not accept the key. Copy it again from the migration page in Skydun.', 'sky-migrate');
             self::redirect_with('error', $message);
         }
 
         $parsed['connected_at'] = time();
         $parsed['migration_url'] = isset($reply['migration_url']) ? esc_url_raw((string) $reply['migration_url']) : '';
         update_option(self::OPTION, $parsed, false);
+        delete_option(self::FINISHED_OPTION);
 
-        self::redirect_with('success', __('Connected. Managed WP starts copying this website as soon as the new website is ready.', 'managed-wp-migrator'));
+        self::redirect_with('success', __('Connected. Skydun starts copying this website as soon as your new website is ready.', 'sky-migrate'));
     }
 
     public static function disconnect()
     {
         if (! current_user_can('manage_options')) {
-            wp_die(esc_html__('You are not allowed to do this.', 'managed-wp-migrator'), 403);
+            wp_die(esc_html__('You are not allowed to do this.', 'sky-migrate'), 403);
         }
 
-        check_admin_referer('managed_wp_migrator_disconnect');
+        check_admin_referer('sky_migrate_disconnect');
         self::forget();
 
-        self::redirect_with('success', __('Disconnected. Managed WP can no longer read this website.', 'managed-wp-migrator'));
+        self::redirect_with('success', __('Disconnected. Skydun can no longer read this website.', 'sky-migrate'));
     }
 
     private static function redirect_with($type, $message)
     {
-        set_transient('managed_wp_migrator_notice_'.get_current_user_id(), ['type' => $type, 'message' => $message], 60);
-        wp_safe_redirect(admin_url('tools.php?page=managed-wp-migrator'));
+        set_transient('sky_migrate_notice_'.get_current_user_id(), ['type' => $type, 'message' => $message], 60);
+        wp_safe_redirect(self::page_url());
         exit;
     }
 
@@ -302,6 +661,7 @@ final class Managed_WP_Migrator
             return null;
         }
 
+        // The key is base64url-encoded JSON, so it survives copy and paste.
         $json = base64_decode(strtr(substr($key, strlen(self::KEY_PREFIX)), '-_', '+/'), true);
         $data = is_string($json) ? json_decode($json, true) : null;
 
@@ -348,7 +708,9 @@ final class Managed_WP_Migrator
             [
                 'methods' => 'POST',
                 'callback' => [__CLASS__, 'dispatch_rest'],
-                // Every request is authenticated by its HMAC signature in dispatch().
+                // Public on purpose: Skydun calls these without a WordPress
+                // login, and dispatch() refuses any request without a valid
+                // HMAC signature made with the migration key's secret.
                 'permission_callback' => '__return_true',
             ]
         );
@@ -361,7 +723,7 @@ final class Managed_WP_Migrator
 
     public static function dispatch_ajax()
     {
-        self::dispatch(isset($_GET['endpoint']) ? sanitize_key(wp_unslash($_GET['endpoint'])) : ''); // phpcs:ignore WordPress.Security.NonceVerification -- signed request.
+        self::dispatch(isset($_GET['endpoint']) ? sanitize_key(wp_unslash($_GET['endpoint'])) : ''); // phpcs:ignore WordPress.Security.NonceVerification -- authenticated by the HMAC signature in dispatch().
     }
 
     /**
@@ -376,10 +738,11 @@ final class Managed_WP_Migrator
         $config = self::config();
 
         if (empty($config['secret']) || empty($config['connected_at'])) {
-            self::fail(403, 'not_connected', 'This website is not connected to Managed WP.');
+            self::fail(403, 'not_connected', 'This website is not connected to Skydun.');
         }
 
-        $body = (string) file_get_contents('php://input');
+        // The raw body, since the signature covers its exact bytes.
+        $body = (string) file_get_contents('php://input'); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- the request body, not a file.
 
         if (! self::verify('/'.self::REST_NAMESPACE.'/'.$endpoint, $body, (string) $config['secret'])) {
             self::fail(401, 'bad_signature', 'The request signature is invalid or expired.');
@@ -389,7 +752,7 @@ final class Managed_WP_Migrator
         $input = is_array($input) ? $input : [];
 
         if (function_exists('set_time_limit')) {
-            @set_time_limit(300); // phpcs:ignore WordPress.PHP.NoSilencedErrors -- disabled on some hosts.
+            @set_time_limit(300); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, Squiz.PHP.DiscouragedFunctions.Discouraged -- large exports; disabled on some hosts.
         }
 
         switch ($endpoint) {
@@ -410,6 +773,14 @@ final class Managed_WP_Migrator
                 break;
             case 'finish':
                 self::forget();
+                update_option(
+                    self::FINISHED_OPTION,
+                    [
+                        'at' => time(),
+                        'migration_url' => isset($config['migration_url']) ? (string) $config['migration_url'] : '',
+                    ],
+                    false
+                );
                 self::json(['status' => 'finished']);
                 break;
         }
@@ -435,11 +806,16 @@ final class Managed_WP_Migrator
         return hash_hmac('sha256', implode("\n", [strtoupper($method), $path, $timestamp, $nonce, hash('sha256', $body)]), $secret);
     }
 
+    private static function request_header($name)
+    {
+        return isset($_SERVER[$name]) ? sanitize_text_field(wp_unslash($_SERVER[$name])) : '';
+    }
+
     private static function verify($path, $body, $secret)
     {
-        $timestamp = isset($_SERVER['HTTP_X_MWP_TIMESTAMP']) ? (string) $_SERVER['HTTP_X_MWP_TIMESTAMP'] : '';
-        $nonce = isset($_SERVER['HTTP_X_MWP_NONCE']) ? (string) $_SERVER['HTTP_X_MWP_NONCE'] : '';
-        $signature = isset($_SERVER['HTTP_X_MWP_SIGNATURE']) ? (string) $_SERVER['HTTP_X_MWP_SIGNATURE'] : '';
+        $timestamp = self::request_header('HTTP_X_MWP_TIMESTAMP');
+        $nonce = self::request_header('HTTP_X_MWP_NONCE');
+        $signature = self::request_header('HTTP_X_MWP_SIGNATURE');
 
         if (! ctype_digit($timestamp) || abs(time() - (int) $timestamp) > self::SIGNATURE_TOLERANCE) {
             return false;
@@ -451,11 +827,11 @@ final class Managed_WP_Migrator
 
         $expected = self::sign($secret, 'POST', $path, $timestamp, $nonce, $body);
 
-        if (! hash_equals($expected, $signature) || get_transient('managed_wp_migrator_nonce_'.$nonce) !== false) {
+        if (! hash_equals($expected, $signature) || get_transient('sky_migrate_nonce_'.$nonce) !== false) {
             return false;
         }
 
-        set_transient('managed_wp_migrator_nonce_'.$nonce, 1, self::SIGNATURE_TOLERANCE * 2);
+        set_transient('sky_migrate_nonce_'.$nonce, 1, self::SIGNATURE_TOLERANCE * 2);
 
         return true;
     }
@@ -466,7 +842,7 @@ final class Managed_WP_Migrator
         status_header($status);
         header('Content-Type: application/json; charset=utf-8');
         header('Cache-Control: no-store');
-        echo wp_json_encode($data); // phpcs:ignore WordPress.Security.EscapeOutput -- JSON.
+        echo wp_json_encode($data);
         exit;
     }
 
@@ -474,7 +850,7 @@ final class Managed_WP_Migrator
     {
         self::json(
             [
-                'code' => 'managed_wp_migrator_'.$code,
+                'code' => self::ERROR_PREFIX.$code,
                 'message' => $message,
             ],
             $status
@@ -520,7 +896,32 @@ final class Managed_WP_Migrator
             );
         }
 
-        $info['db_bytes'] = (int) $wpdb->get_var(
+        $estimates = self::estimates();
+        $info['db_bytes'] = $estimates['db_bytes'];
+        $info['file_count'] = $estimates['files_complete'] ? $estimates['file_count'] : null;
+        $info['file_bytes'] = $estimates['files_complete'] ? $estimates['file_bytes'] : null;
+
+        return $info;
+    }
+
+    /**
+     * The database and file sizes, counting files for at most a few seconds.
+     * Cached briefly, since the admin page and connect() both ask.
+     *
+     * @return array{db_bytes: int, file_count: int, file_bytes: int, files_complete: bool}
+     */
+    private static function estimates()
+    {
+        global $wpdb;
+
+        $cached = get_transient(self::ESTIMATES_TRANSIENT);
+
+        if (is_array($cached)) {
+            return $cached;
+        }
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- table sizes have no WordPress API.
+        $db_bytes = (int) $wpdb->get_var(
             $wpdb->prepare(
                 'SELECT SUM(DATA_LENGTH + INDEX_LENGTH) FROM information_schema.TABLES WHERE TABLE_SCHEMA = %s AND TABLE_NAME LIKE %s',
                 DB_NAME,
@@ -535,7 +936,7 @@ final class Managed_WP_Migrator
 
         foreach (self::walk() as $absolute) {
             $count++;
-            $bytes += (int) @filesize($absolute); // phpcs:ignore WordPress.PHP.NoSilencedErrors -- a file may vanish mid-walk.
+            $bytes += self::size($absolute);
 
             if ($count % 200 === 0 && microtime(true) > $deadline) {
                 $complete = false;
@@ -543,19 +944,40 @@ final class Managed_WP_Migrator
             }
         }
 
-        $info['file_count'] = $complete ? $count : null;
-        $info['file_bytes'] = $complete ? $bytes : null;
+        $estimates = [
+            'db_bytes' => $db_bytes,
+            'file_count' => $count,
+            'file_bytes' => $bytes,
+            'files_complete' => $complete,
+        ];
 
-        return $info;
+        set_transient(self::ESTIMATES_TRANSIENT, $estimates, 10 * MINUTE_IN_SECONDS);
+
+        return $estimates;
+    }
+
+    /**
+     * A file's size, or 0 when it vanished mid-walk.
+     */
+    private static function size($absolute)
+    {
+        clearstatcache(true, $absolute);
+        $size = is_readable($absolute) ? filesize($absolute) : false;
+
+        return $size === false ? 0 : (int) $size;
     }
 
     // ------------------------------------------------------------------
     // Database
+    //
+    // The export reads every table with this website's prefix, including
+    // ones plugins created, so it queries $wpdb directly.
+    // phpcs:disable WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared
     // ------------------------------------------------------------------
 
     /**
      * This website's tables (those with its prefix), with the statement that
-     * recreates each under the wp_ prefix Managed WP uses.
+     * recreates each under the wp_ prefix Skydun uses.
      *
      * @return list<array<string, mixed>>
      */
@@ -566,7 +988,7 @@ final class Managed_WP_Migrator
         $tables = [];
 
         foreach (self::table_names() as $name) {
-            $create = $wpdb->get_row('SHOW CREATE TABLE `'.$name.'`', ARRAY_N); // phpcs:ignore WordPress.DB -- name from SHOW TABLES.
+            $create = $wpdb->get_row('SHOW CREATE TABLE `'.$name.'`', ARRAY_N); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter -- $name comes from SHOW TABLES and has no backticks.
             $status = $wpdb->get_row($wpdb->prepare('SHOW TABLE STATUS LIKE %s', $name), ARRAY_A);
             $target = self::target_table($name);
             $sql = is_array($create) ? (string) $create[1] : '';
@@ -576,6 +998,7 @@ final class Managed_WP_Migrator
                 'target' => $target,
                 'rows' => is_array($status) ? (int) $status['Rows'] : 0,
                 'bytes' => is_array($status) ? (int) $status['Data_length'] : 0,
+                // Base64 so any bytes in the statement survive JSON.
                 'create' => base64_encode((string) $sql),
             ];
         }
@@ -632,7 +1055,7 @@ final class Managed_WP_Migrator
 
         $max_bytes = isset($input['max_bytes']) ? (int) $input['max_bytes'] : self::DEFAULT_CHUNK_BYTES;
         $max_bytes = max(65536, min(self::MAX_CHUNK_BYTES, $max_bytes));
-        $columns = $wpdb->get_results('SHOW COLUMNS FROM `'.$table.'`', ARRAY_A); // phpcs:ignore WordPress.DB -- validated name.
+        $columns = $wpdb->get_results('SHOW COLUMNS FROM `'.$table.'`', ARRAY_A);
         $names = [];
         $binary = [];
         $primary = [];
@@ -686,12 +1109,12 @@ final class Managed_WP_Migrator
             if ($key !== null) {
                 $query = $last_key === null
                     ? "SELECT * FROM `{$table}` ORDER BY {$key} LIMIT ".self::ROW_BATCH
-                    : $wpdb->prepare("SELECT * FROM `{$table}` WHERE {$key} > %s ORDER BY {$key} LIMIT ".self::ROW_BATCH, $last_key); // phpcs:ignore WordPress.DB
+                    : $wpdb->prepare("SELECT * FROM `{$table}` WHERE {$key} > %s ORDER BY {$key} LIMIT ".self::ROW_BATCH, $last_key);
             } else {
                 $query = "SELECT * FROM `{$table}`{$order} LIMIT ".($offset + $rows).', '.self::ROW_BATCH;
             }
 
-            $batch = $wpdb->get_results($query, ARRAY_N); // phpcs:ignore WordPress.DB -- built from validated names.
+            $batch = $wpdb->get_results($query, ARRAY_N); // phpcs:ignore PluginCheck.Security.DirectDB.UnescapedDBParameter -- table and key names validated against SHOW TABLES/COLUMNS, values prepared.
 
             if ($wpdb->last_error !== '') {
                 self::fail(500, 'query_failed', 'Reading '.$table.' failed: '.$wpdb->last_error);
@@ -748,14 +1171,21 @@ final class Managed_WP_Migrator
         }
 
         return [
+            // Base64 so binary-safe SQL survives JSON.
             'sql' => base64_encode($sql),
             'rows' => $rows,
             'next' => $next,
         ];
     }
 
+    // phpcs:enable
+
     // ------------------------------------------------------------------
     // Files
+    //
+    // Files are streamed straight from disk in bounded pieces; WP_Filesystem
+    // would read each whole file into memory first.
+    // phpcs:disable WordPress.WP.AlternativeFunctions
     // ------------------------------------------------------------------
 
     /**
@@ -775,7 +1205,7 @@ final class Managed_WP_Migrator
         foreach (self::walk($after) as $logical => $absolute) {
             $files[] = [
                 'p' => $logical,
-                's' => (int) @filesize($absolute), // phpcs:ignore WordPress.PHP.NoSilencedErrors
+                's' => self::size($absolute),
             ];
             $last = $logical;
 
@@ -809,7 +1239,7 @@ final class Managed_WP_Migrator
 
         if (isset($input['length']) && count($paths) === 1) {
             $absolute = self::resolve((string) $paths[0]);
-            $handle = $absolute !== null ? @fopen($absolute, 'rb') : false; // phpcs:ignore WordPress
+            $handle = $absolute !== null && is_readable($absolute) ? fopen($absolute, 'rb') : false;
 
             if ($handle === false) {
                 self::fail(404, 'missing_file', 'The file is gone.');
@@ -817,40 +1247,66 @@ final class Managed_WP_Migrator
 
             $length = max(0, min(self::MAX_CHUNK_BYTES, (int) $input['length']));
             fseek($handle, max(0, (int) (isset($input['offset']) ? $input['offset'] : 0)));
-
-            while ($length > 0 && ! feof($handle)) {
-                $data = fread($handle, min(65536, $length)); // phpcs:ignore WordPress
-
-                if ($data === false || $data === '') {
-                    break;
-                }
-
-                echo $data; // phpcs:ignore WordPress.Security.EscapeOutput -- file bytes.
-                $length -= strlen($data);
-            }
-
-            fclose($handle); // phpcs:ignore WordPress
+            self::stream($handle, $length, false);
+            fclose($handle);
             exit;
         }
 
         foreach ($paths as $logical) {
             $logical = (string) $logical;
             $absolute = self::resolve($logical);
-            $size = $absolute !== null ? @filesize($absolute) : false; // phpcs:ignore WordPress.PHP.NoSilencedErrors
-            $hash = $absolute !== null ? @md5_file($absolute) : false; // phpcs:ignore WordPress.PHP.NoSilencedErrors
+            $handle = $absolute !== null && is_readable($absolute) ? fopen($absolute, 'rb') : false;
+            $stat = $handle !== false ? fstat($handle) : false;
+            $hash = $handle !== false ? md5_file($absolute) : false;
 
-            if ($size === false || $hash === false) {
-                echo wp_json_encode(['p' => $logical, 'e' => 'missing'])."\n"; // phpcs:ignore WordPress.Security.EscapeOutput
+            if ($stat === false || $hash === false) {
+                if ($handle !== false) {
+                    fclose($handle);
+                }
+
+                echo wp_json_encode(['p' => $logical, 'e' => 'missing'])."\n";
 
                 continue;
             }
 
-            echo wp_json_encode(['p' => $logical, 's' => $size, 'h' => $hash])."\n"; // phpcs:ignore WordPress.Security.EscapeOutput
-            readfile($absolute); // phpcs:ignore WordPress
+            $size = (int) $stat['size'];
+            echo wp_json_encode(['p' => $logical, 's' => $size, 'h' => $hash])."\n";
+            // Exactly $size bytes even if the file changes meanwhile, so the
+            // files after it stay readable; the MD5 then flags this one.
+            self::stream($handle, $size, true);
+            fclose($handle);
         }
 
         exit;
     }
+
+    /**
+     * Echo up to $length bytes from $handle, padding with NUL bytes to
+     * exactly $length when $pad is set and the file ends early.
+     *
+     * @param  resource  $handle
+     */
+    private static function stream($handle, $length, $pad)
+    {
+        while ($length > 0 && ! feof($handle)) {
+            $data = fread($handle, min(65536, $length));
+
+            if ($data === false || $data === '') {
+                break;
+            }
+
+            echo $data; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- raw file bytes for Skydun, not HTML.
+            $length -= strlen($data);
+        }
+
+        while ($pad && $length > 0) {
+            $piece = min(65536, $length);
+            echo str_repeat("\0", $piece); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- padding bytes.
+            $length -= $piece;
+        }
+    }
+
+    // phpcs:enable
 
     /**
      * The file behind a logical path, or null when the path is not one this
@@ -931,7 +1387,8 @@ final class Managed_WP_Migrator
      */
     private static function list_directory($directory)
     {
-        $names = @scandir($directory); // phpcs:ignore WordPress.PHP.NoSilencedErrors -- unreadable directories are skipped.
+        // Unreadable directories are skipped.
+        $names = is_readable($directory) ? scandir($directory) : false;
         $entries = [];
 
         foreach (is_array($names) ? $names : [] as $name) {
@@ -1014,9 +1471,28 @@ final class Managed_WP_Migrator
         return count($prefix) < count($path) && array_slice($path, 0, count($prefix)) === $prefix;
     }
 
+    /**
+     * This plugin's own folder, whatever it was installed as.
+     */
+    private static function own_path()
+    {
+        static $path = null;
+
+        if ($path === null) {
+            $folder = dirname(plugin_basename(__FILE__));
+            $path = $folder !== '.' ? 'wp-content/plugins/'.$folder : '';
+        }
+
+        return $path;
+    }
+
     private static function is_excluded($logical)
     {
         if (in_array($logical, self::EXCLUDED, true) || in_array(basename($logical), self::EXCLUDED_NAMES, true)) {
+            return true;
+        }
+
+        if ($logical === self::own_path()) {
             return true;
         }
 
@@ -1030,7 +1506,9 @@ final class Managed_WP_Migrator
     }
 }
 
-Managed_WP_Migrator::boot();
+Sky_Migrate::boot();
 
+register_activation_hook(__FILE__, ['Sky_Migrate', 'activate']);
 // Deactivating the plugin disconnects the website.
-register_deactivation_hook(__FILE__, ['Managed_WP_Migrator', 'forget']);
+register_deactivation_hook(__FILE__, ['Sky_Migrate', 'forget']);
+register_uninstall_hook(__FILE__, ['Sky_Migrate', 'uninstall']);

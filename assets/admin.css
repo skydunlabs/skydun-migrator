@@ -1,0 +1,219 @@
+.sky-migrate {
+	max-width: 1100px;
+}
+
+.sky-migrate-lead {
+	max-width: 720px;
+	font-size: 14px;
+	color: #50575e;
+}
+
+/* Steps */
+
+.sky-migrate-steps {
+	display: flex;
+	gap: 8px;
+	margin: 24px 0;
+	padding: 0;
+	list-style: none;
+	counter-reset: none;
+}
+
+.sky-migrate-steps li {
+	display: flex;
+	flex: 1;
+	align-items: center;
+	gap: 10px;
+	margin: 0;
+	padding: 12px 16px;
+	border: 1px solid #dcdcde;
+	border-radius: 4px;
+	background: #fff;
+	color: #646970;
+}
+
+.sky-migrate-step-number {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex: none;
+	width: 26px;
+	height: 26px;
+	border-radius: 50%;
+	background: #f0f0f1;
+	font-weight: 600;
+}
+
+.sky-migrate-step-label {
+	font-weight: 600;
+}
+
+.sky-migrate-steps .is-current {
+	border-color: var(--wp-admin-theme-color, #2271b1);
+	color: #1d2327;
+	box-shadow: inset 0 -3px 0 var(--wp-admin-theme-color, #2271b1);
+}
+
+.sky-migrate-steps .is-current .sky-migrate-step-number {
+	background: var(--wp-admin-theme-color, #2271b1);
+	color: #fff;
+}
+
+.sky-migrate-steps .is-done {
+	color: #1d2327;
+}
+
+.sky-migrate-steps .is-done .sky-migrate-step-number {
+	background: #00a32a;
+	color: #fff;
+}
+
+/* Layout */
+
+.sky-migrate-layout {
+	display: grid;
+	grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
+	gap: 20px;
+	align-items: start;
+}
+
+@media (max-width: 960px) {
+	.sky-migrate-layout {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}
+
+@media (max-width: 600px) {
+	.sky-migrate-steps {
+		flex-direction: column;
+	}
+}
+
+.sky-migrate-card {
+	margin: 0 0 20px;
+	padding: 20px 24px;
+	border: 1px solid #dcdcde;
+	border-radius: 4px;
+	background: #fff;
+}
+
+.sky-migrate-card h2 {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 0 0 12px;
+	font-size: 16px;
+}
+
+.sky-migrate-card h3 {
+	margin: 16px 0 8px;
+	font-size: 13px;
+}
+
+.sky-migrate-card.is-success {
+	border-left: 4px solid #00a32a;
+}
+
+.sky-migrate-card .submit {
+	margin-bottom: 0;
+	padding-bottom: 0;
+}
+
+.sky-migrate-icon {
+	color: var(--wp-admin-theme-color, #2271b1);
+}
+
+.sky-migrate-card.is-success .sky-migrate-icon {
+	color: #00a32a;
+}
+
+.sky-migrate-icon.is-active {
+	animation: sky-migrate-spin 2s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.sky-migrate-icon.is-active {
+		animation: none;
+	}
+}
+
+@keyframes sky-migrate-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+#sky-migrate-key {
+	font-size: 12px;
+	word-break: break-all;
+}
+
+.sky-migrate-field-error {
+	margin: 6px 0 0;
+	color: #d63638;
+}
+
+/* This website */
+
+.sky-migrate-facts {
+	display: grid;
+	grid-template-columns: auto 1fr;
+	gap: 6px 16px;
+	margin: 0 0 16px;
+}
+
+.sky-migrate-facts dt {
+	color: #646970;
+}
+
+.sky-migrate-facts dd {
+	margin: 0;
+	font-weight: 600;
+}
+
+.sky-migrate-card .spinner {
+	float: none;
+	margin: 0 6px 0 0;
+}
+
+.sky-migrate-checks,
+.sky-migrate-scope {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.sky-migrate-checks li,
+.sky-migrate-scope li {
+	position: relative;
+	margin: 0 0 8px;
+	padding-left: 26px;
+}
+
+.sky-migrate-checks li.is-pending {
+	padding-left: 0;
+}
+
+.sky-migrate-checks li::before,
+.sky-migrate-scope li::before {
+	position: absolute;
+	top: 0;
+	left: 0;
+	font: normal 20px/1 dashicons;
+}
+
+.sky-migrate-checks .is-ok::before,
+.sky-migrate-scope.is-included li::before {
+	content: "\f147";
+	color: #00a32a;
+}
+
+.sky-migrate-checks .is-warning::before {
+	content: "\f534";
+	color: #dba617;
+}
+
+.sky-migrate-scope.is-excluded li::before {
+	content: "\f158";
+	color: #a7aaad;
+}
