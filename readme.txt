@@ -4,7 +4,7 @@ Tags: migration, migrate, move, copy, hosting
 Requires at least: 5.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 1.0.0
+Stable tag: 2.0.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -70,6 +70,9 @@ Not yet.
 2. Connected: follow the copy in Skydun.
 
 == Changelog ==
+
+= 2.0.0 =
+* Renamed from Managed WP Migrator to Sky Migrate. Migration keys from Skydun work as before.
 
 = 1.0.0 =
 * First release.

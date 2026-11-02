@@ -3,7 +3,7 @@
  * Plugin Name:       Sky Migrate
  * Plugin URI:        https://skydun.com
  * Description:       Copies this website to Skydun. Paste the migration key from Skydun under Tools → Sky Migrate.
- * Version:           1.0.0
+ * Version:           2.0.0
  * Requires at least: 5.0
  * Requires PHP:      7.4
  * Author:            Skydun
@@ -24,7 +24,7 @@ defined('ABSPATH') || exit;
 
 final class Sky_Migrate
 {
-    const VERSION = '1.0.0';
+    const VERSION = '2.0.0';
 
     const SLUG = 'sky-migrate';
 
